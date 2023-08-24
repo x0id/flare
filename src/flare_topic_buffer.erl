@@ -76,7 +76,6 @@ start_link(Name, Topic, Opts, Partitions) ->
 
 init(Name, Parent, Opts) ->
     {Topic, TopicOpts, Partitions} = Opts,
-    ok = shackle_backlog:new(flare_topic, Name),
 
     Acks = ?LOOKUP(acks, TopicOpts, ?DEFAULT_TOPIC_ACKS),
     BufferDelay = ?LOOKUP(buffer_delay, TopicOpts,
@@ -87,6 +86,10 @@ init(Name, Parent, Opts) ->
         ?DEFAULT_TOPIC_COMPRESSION),
     MetadataDelay = ?LOOKUP(metadata_delay, TopicOpts,
         ?DEFAULT_TOPIC_METADATA_DELAY),
+
+    % create backlog (semaphore) for topic buffer Name
+    BacklogSize = BufferSizeMax * 4,
+    persistent_term:put({flare_sema, Name}, sema_nif:create(BacklogSize)),
 
     {ok, #state {
         buffer_delay = BufferDelay,
@@ -148,14 +151,13 @@ handle_msg(?MSG_METADATA_DELAY, #state {
                 metadata_timer_ref = timer(MetadataDelay, ?MSG_METADATA_DELAY)
             }}
     end;
-handle_msg({produce, ReqId, Message, Size, Pid}, #state {
+handle_msg({produce, ReqId, Message, Size, Pid, ReleaseFun}, #state {
         buffer = Buffer,
         buffer_count = BufferCount,
         buffer_delay = BufferDelay,
         buffer_size = BufferSize,
         buffer_size_max = SizeMax,
         buffer_timer_ref = BufferTimerRef,
-        name = Name,
         requests = Requests
     } = State) when (BufferSize + Size) > SizeMax ->
 
@@ -166,7 +168,7 @@ handle_msg({produce, ReqId, Message, Size, Pid}, #state {
         requests = [{ReqId, Pid} | Requests]
     }),
 
-    shackle_backlog:decrement(shackle_backlog_flare_topic, Name, Size),
+    ReleaseFun(Size),
     erlang:cancel_timer(BufferTimerRef),
 
     {ok, State#state {
@@ -176,15 +178,14 @@ handle_msg({produce, ReqId, Message, Size, Pid}, #state {
         buffer_timer_ref = timer(BufferDelay, ?MSG_BUFFER_DELAY),
         requests = []
     }};
-handle_msg({produce, ReqId, Message, Size, Pid}, #state {
+handle_msg({produce, ReqId, Message, Size, Pid, ReleaseFun}, #state {
         buffer = Buffer,
         buffer_count = BufferCount,
         buffer_size = BufferSize,
-        name = Name,
         requests = Requests
     } = State) ->
 
-    shackle_backlog:decrement(shackle_backlog_flare_topic, Name, Size),
+    ReleaseFun(Size),
 
     {ok, State#state {
         buffer = [Message | Buffer],

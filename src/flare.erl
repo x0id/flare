@@ -16,16 +16,19 @@
 
 async_produce(Topic, Timestamp, Key, Value, Headers, Pid) ->
     case flare_topic:server(Topic) of
-        {ok, {BufferSize, Server}} ->
+        {ok, {_BufferSize, Server}} ->
             {Msg, Size} = flare_utils:msg(Timestamp, Key, Value, Headers),
-            case shackle_backlog:check(shackle_backlog_flare_topic, Server,
-                    BufferSize * 4, Size) of
-                true ->
-                    ReqId = {os:timestamp(), self()},
-                    Server ! {produce, ReqId, Msg, Size, Pid},
+
+            Sema = persistent_term:get({flare_sema, Server}),
+            case sema_nif:occupy(Sema, Size) of
+                {ok, _} ->
+                    Self = self(),
+                    ReleaseFun = fun (Cnt) -> sema_nif:vacate(Sema, Cnt, Self) end,
+                    ReqId = {os:timestamp(), Self},
+                    Server ! {produce, ReqId, Msg, Size, Pid, ReleaseFun},
                     {ok, ReqId};
-                false ->
-                    {error, backlog_full}
+                {error, backlog_full} ->
+                    error
             end;
         {error, Reason} ->
             {error, Reason}
